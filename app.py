@@ -3,37 +3,39 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 import numpy as np
+from datetime import datetime
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="FX Trend Scanner Pro", layout="wide")
+st.set_page_config(page_title="FX Trend Scanner Pro", layout="wide", page_icon="📈")
 
+# Recupero API Key dai Secrets
 try:
     API_KEY = st.secrets["X_RAPIDAPI_KEY"]
 except:
-    st.error("Configura X_RAPIDAPI_KEY nei Secrets.")
+    st.error("Configura 'X_RAPIDAPI_KEY' nei Secrets di Streamlit Cloud.")
     st.stop()
 
-# --- FUNZIONI TECNICHE ---
-def calculate_indicators(df):
-    # EMA per il Trend
+# --- MOTORE DI CALCOLO MATEMATICO (Sostituisce librerie esterne) ---
+def apply_indicators(df):
+    # 1. EMA (Exponential Moving Average)
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     
-    # RSI per ipercomprato/venduto
+    # 2. RSI (Relative Strength Index)
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # ATR per Volatilità e SL
+    # 3. ATR (Average True Range) - Per Volatilità e Stop Loss
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
     
-    # ADX per Forza Trend
+    # 4. ADX (Average Directional Index) - Per Forza Trend
     up = df['high'] - df['high'].shift()
     down = df['low'].shift() - df['low']
     p_dm = np.where((up > down) & (up > 0), up, 0)
@@ -49,87 +51,107 @@ def calculate_indicators(df):
 def fetch_data(symbol, interval="1h"):
     url = "https://twelve-data1.p.rapidapi.com/time_series"
     headers = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": "twelve-data1.p.rapidapi.com"}
-    params = {"symbol": symbol, "interval": interval, "outputsize": "100", "format": "json"}
+    params = {"symbol": symbol, "interval": interval, "outputsize": "150", "format": "json"}
     try:
-        res = requests.get(url, headers=headers, params=params)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         data = res.json()
         if "values" in data:
             df = pd.DataFrame(data["values"])
-            for col in ['open', 'high', 'low', 'close']: df[col] = pd.to_numeric(df[col])
+            for col in ['open', 'high', 'low', 'close']: 
+                df[col] = pd.to_numeric(df[col])
             df['datetime'] = pd.to_datetime(df['datetime'])
-            return calculate_indicators(df.sort_values('datetime'))
-    except: return None
+            return apply_indicators(df.sort_values('datetime'))
+    except:
+        return None
+    return None
 
-# --- LOGICA DI SCANNER ---
+# --- LOGICA DI SEGNALE ---
+def get_verdict(last_row):
+    adx = last_row['adx']
+    rsi = last_row['rsi']
+    price = last_row['close']
+    ema20 = last_row['ema20']
+    
+    trend_up = price > ema20
+    is_strong = adx > 25
+    
+    if is_strong and trend_up and rsi < 65:
+        return "🟢 BUY CONFIRMED", "green"
+    elif is_strong and not trend_up and rsi > 35:
+        return "🔴 SELL CONFIRMED", "red"
+    else:
+        return "🟡 ATTENDERE (Trend Debole o Iperesteso)", "blue"
+
+# --- INTERFACCIA UTENTE ---
+st.title("⚖️ Trading Terminal: Scanner & Signals")
+
+# 1. MARKET SCANNER (Top Bar)
 assets = {
     "XAU/USD": "Oro", "EUR/USD": "Euro", "GBP/USD": "Sterlina", 
     "USD/JPY": "Yen", "AUD/USD": "Aussie", "BTC/USD": "Bitcoin"
 }
 
-st.title("🚀 FX Trend Scanner & Signal Terminal")
-
-# 1. SCANNER IN ALTO
-st.subheader("🔍 Market Scanner (Forza Trend)")
+st.subheader("🔍 Real-Time Market Scanner")
 cols = st.columns(len(assets))
-scanner_results = {}
+all_data = {}
 
 for i, (sym, name) in enumerate(assets.items()):
-    df_mini = fetch_data(sym, "1h")
-    if df_mini is not None:
-        last = df_mini.iloc[-1]
-        adx_val = last['adx']
-        # Evidenzia se il trend è forte (>25)
-        status = "🔥 FORTE" if adx_val > 25 else "😴 Debole"
-        cols[i].metric(sym, f"{last['close']:.2f}", status, delta_color="normal" if adx_val > 25 else "off")
-        scanner_results[sym] = df_mini
+    df_asset = fetch_data(sym, "1h")
+    if df_asset is not None:
+        all_data[sym] = df_asset
+        last = df_asset.iloc[-1]
+        status = "🔥" if last['adx'] > 25 else "💤"
+        cols[i].metric(sym, f"{last['close']:.2f}", f"{status} ADX:{last['adx']:.0f}")
 
 st.divider()
 
-# 2. DETTAGLIO ASSET SELEZIONATO
-sel_asset = st.selectbox("Seleziona Asset per analisi dettagliata", list(assets.keys()))
-df = scanner_results.get(sel_asset)
+# 2. ANALISI DETTAGLIATA
+sel_sym = st.selectbox("Seleziona Asset per analisi tecnica profonda", list(assets.keys()))
+df = all_data.get(sel_sym)
 
 if df is not None:
     last = df.iloc[-1]
+    verdict, color = get_verdict(last)
+    
+    # Header Segnale
+    st.markdown(f"### Verdetto: :{color}[{verdict}]")
     
     # Griglia Indicatori
-    st.markdown("### 📊 Indicatori Tecnici")
-    ind1, ind2, ind3, ind4 = st.columns(4)
-    
-    # Segnale EMA
-    ema_signal = "BUY" if last['close'] > last['ema20'] else "SELL"
-    ind1.info(f"**EMA Trend:** {ema_signal}")
-    
-    # Segnale RSI
-    rsi_val = last['rsi']
-    rsi_sig = "IPERCOMPRATO (Vendi)" if rsi_val > 70 else "IPERVENDUTO (Compra)" if rsi_val < 30 else "Neutro"
-    ind2.warning(f"**RSI (14):** {rsi_val:.1f}\n\n{rsi_sig}")
-    
-    # ADX Forza
-    ind3.success(f"**ADX Forza:** {last['adx']:.1f}\n\n{'OPERATIVO' if last['adx'] > 25 else 'ATTENDERE'}")
-    
-    # ATR Volatilità
-    ind4.help(f"**ATR (Volatilità):** {last['atr']:.5f}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ADX (Forza)", f"{last['adx']:.1f}", "FORTE" if last['adx'] > 25 else "DEBOLE")
+    c2.metric("RSI (Momento)", f"{last['rsi']:.1f}", "IPER" if last['rsi'] > 70 or last['rsi'] < 30 else "OK")
+    c3.metric("ATR (Volatilità)", f"{last['atr']:.4f}")
+    c4.metric("Trend EMA", "RIALZO" if last['close'] > last['ema20'] else "RIBASSO")
 
-    # 3. LIVELLI OPERATIVI (BOX EVIDENZIATO)
-    st.subheader("🎯 Piano d'Azione")
+    # 3. LIVELLI OPERATIVI
+    st.subheader("🎯 Piano d'Azione (Money Management)")
     entry = last['close']
-    sl_dist = last['atr'] * 1.5
-    is_up = last['close'] > last['ema20']
+    sl_dist = last['atr'] * 2 # Stop Loss basato su 2 volte la volatilità media
+    is_buy = last['close'] > last['ema20']
     
-    sl = entry - sl_dist if is_up else entry + sl_dist
-    tp = entry + (sl_dist * 3) if is_up else entry - (sl_dist * 3)
+    sl = entry - sl_dist if is_buy else entry + sl_dist
+    tp = entry + (sl_dist * 3) if is_buy else entry - (sl_dist * 3) # Target 1:3
 
-    st.success(f"**SUGGERIMENTO:** {'APRI LONG (BUY)' if is_up and last['adx'] > 25 else 'APRI SHORT (SELL)' if not is_up and last['adx'] > 25 else 'NON ENTRARE (Trend Debole)'}")
-    
     o1, o2, o3 = st.columns(3)
-    o1.code(f"ENTRY: {entry:.5f}")
-    o2.code(f"STOP LOSS: {sl:.5f}")
-    o3.code(f"TAKE PROFIT: {tp:.5f}")
+    o1.info(f"**ENTRY:** \n`{entry:.5f}`")
+    o2.error(f"**STOP LOSS:** \n`{sl:.5f}`")
+    o3.success(f"**TAKE PROFIT:** \n`{tp:.5f}`")
 
     # 4. GRAFICO PROFESSIONALE
-    fig = go.Figure(data=[go.Candlestick(x=df['datetime'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="Prezzo")])
-    fig.add_trace(go.Scatter(x=df['datetime'], y=df['ema20'], line=dict(color='orange', width=1), name="EMA 20"))
-    fig.add_trace(go.Scatter(x=df['datetime'], y=df['ema50'], line=dict(color='cyan', width=1), name="EMA 50"))
-    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
+    fig = go.Figure(data=[go.Candlestick(
+        x=df['datetime'], open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'], name="Prezzo"
+    )])
+    fig.add_trace(go.Scatter(x=df['datetime'], y=df['ema20'], line=dict(color='orange', width=1.2), name="EMA 20"))
+    fig.add_trace(go.Scatter(x=df['datetime'], y=df['ema50'], line=dict(color='cyan', width=1.2), name="EMA 50"))
+    
+    fig.update_layout(
+        template="plotly_dark", 
+        xaxis_rangeslider_visible=False, 
+        height=600,
+        margin=dict(l=10, r=10, t=10, b=10)
+    )
     st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.warning("⚠️ Caricamento dati fallito. Verifica la tua API Key o i limiti di Twelve Data.")
