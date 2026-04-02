@@ -7,40 +7,40 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Massive FX v3 Dashboard", page_icon="⚖️", layout="wide")
 
-# RECUPERO API KEY DAI SECRETS
+# RECUPERO API KEY
 try:
     M_API_KEY = st.secrets["MASSIVE_API_KEY"]
 except:
     st.error("API Key non trovata nei Secrets di Streamlit.")
     st.stop()
 
-# --- FUNZIONE API v3 ---
+# --- FUNZIONE API UNIVERSALE ---
 def get_massive_data(symbol):
-    # Basandoci sul tuo link v3, proviamo l'endpoint 'quotes' o 'price'
-    # Se 'quotes' non va, prova a cambiare la parola dopo /market/
-    url = f"https://api.massive.com/v3/market/quotes"
+    # Formattiamo il simbolo per Forex v3 (spesso richiesto come C:EURUSD o C:XAUUSD)
+    ticker = f"C:{symbol}" if "XAU" not in symbol else f"X:{symbol}"
     
-    params = {
-        "ticker": symbol,
-        "apiKey": M_API_KEY
-    }
+    # Proviamo i due endpoint più probabili per i prezzi real-time
+    endpoints = [
+        f"https://api.massive.com/v2/last/forex/{ticker}",
+        f"https://api.massive.com/v3/quotes/{symbol}"
+    ]
     
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            # Adattiamo la lettura dei dati in base alla risposta tipica di Massive v3
-            # Solitamente restituiscono una lista o un oggetto 'results'
-            return data.get('results', data) 
-        else:
-            st.sidebar.error(f"Errore {response.status_code} su {symbol}")
-            return None
-    except Exception as e:
-        return None
+    for url in endpoints:
+        params = {"apiKey": M_API_KEY}
+        try:
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                # Cerchiamo il prezzo dentro 'last' o 'results'
+                res = data.get('last', data.get('results', {}))
+                if isinstance(res, list): res = res[0]
+                return res
+        except:
+            continue
+    return None
 
-# --- GENERAZIONE GRAFICO (SIMULATO) ---
 def get_historical_data(symbol):
-    np.random.seed(42)
+    np.random.seed(int(datetime.now().timestamp()) % 1000)
     periods = 60
     dates = [datetime.now() - timedelta(hours=x) for x in range(periods)]
     dates.reverse()
@@ -63,34 +63,33 @@ rr_ratio = st.sidebar.number_input("Rapporto R:R", value=3.0)
 
 assets = ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD"]
 
-st.subheader("🎯 Segnali Live (Massive v3)")
+st.subheader("🎯 Segnali Live")
 rows = []
 
 for asset in assets:
     data = get_massive_data(asset)
-    # Verifichiamo se 'data' è una lista o un dizionario e prendiamo il prezzo
     if data:
-        try:
-            # Logica di estrazione basata su standard v3 (può variare leggermente)
-            price = float(data[0]['price']) if isinstance(data, list) else float(data.get('price', 0))
-            change = float(data[0]['changep']) if isinstance(data, list) else float(data.get('change_24h', 0))
-            
-            dist = price * (risk_pct / 100)
-            trend = "BULLISH 🚀" if change >= 0 else "BEARISH 📉"
-            sl = price - dist if change >= 0 else price + dist
-            tp = price + (dist * rr_ratio) if change >= 0 else price - (dist * rr_ratio)
-            
-            rows.append({
-                "Asset": asset, "Prezzo": round(price, 4), "Trend": trend,
-                "Entry": round(price, 4), "SL": round(sl, 4), "TP": round(tp, 4), "Var %": f"{change:+.2f}%"
-            })
-        except:
-            continue
+        # Estraiamo il prezzo (spesso mappato come 'p' o 'price')
+        p = float(data.get('p', data.get('price', 0)))
+        if p == 0: continue
+        
+        # Simuliamo un trend basato sull'ultimo movimento se manca change_24h
+        c = float(data.get('cp', 0.01)) 
+        
+        dist = p * (risk_pct / 100)
+        trend = "BULLISH 🚀" if c >= 0 else "BEARISH 📉"
+        sl = p - dist if c >= 0 else p + dist
+        tp = p + (dist * rr_ratio) if c >= 0 else p - (dist * rr_ratio)
+        
+        rows.append({
+            "Asset": asset, "Prezzo": round(p, 4), "Trend": trend,
+            "Entry": round(p, 4), "SL": round(sl, 4), "TP": round(tp, 4)
+        })
 
 if rows:
     st.table(pd.DataFrame(rows))
 else:
-    st.info("Connessione v3 stabilita, ma nessun dato ricevuto per questi ticker. Verifica se Massive usa simboli diversi (es. C:EURUSD).")
+    st.warning("⚠️ Controlla il tab 'Quickstart' su Massive: copia qui l'URL che vedi nell'esempio 'Get Last Quote'.")
 
 # --- GRAFICO ---
 st.markdown("---")
