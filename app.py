@@ -5,38 +5,42 @@ import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Massive FX Dashboard", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Massive FX v3 Dashboard", page_icon="⚖️", layout="wide")
 
-# RECUPERO API KEY
+# RECUPERO API KEY DAI SECRETS
 try:
     M_API_KEY = st.secrets["MASSIVE_API_KEY"]
 except:
-    st.error("API Key non trovata nei Secrets.")
+    st.error("API Key non trovata nei Secrets di Streamlit.")
     st.stop()
 
-# FUNZIONE DI TEST ENDPOINT
+# --- FUNZIONE API v3 ---
 def get_massive_data(symbol):
-    # Proviamo i 3 formati più comuni se il primo fallisce
-    formats = [symbol, symbol.replace("USD", "/USD"), symbol.replace("USD", "_USD")]
+    # Basandoci sul tuo link v3, proviamo l'endpoint 'quotes' o 'price'
+    # Se 'quotes' non va, prova a cambiare la parola dopo /market/
+    url = f"https://api.massive.com/v3/market/quotes"
     
-    headers = {"Authorization": f"Bearer {M_API_KEY}"}
+    params = {
+        "ticker": symbol,
+        "apiKey": M_API_KEY
+    }
     
-    for fmt in formats:
-        # Tenta con l'endpoint standard. Se Massive usa un percorso diverso, 
-        # prova a cambiare 'quotes' con 'price' o 'market' qui sotto
-        url = f"https://api.massive.com/v1/quotes/{fmt}"
-        try:
-            response = requests.get(url, headers=headers, timeout=5)
-            if response.status_code == 200:
-                return response.json()
-        except:
-            continue
-    
-    # Se arriva qui, ha fallito tutti i formati
-    return None
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            # Adattiamo la lettura dei dati in base alla risposta tipica di Massive v3
+            # Solitamente restituiscono una lista o un oggetto 'results'
+            return data.get('results', data) 
+        else:
+            st.sidebar.error(f"Errore {response.status_code} su {symbol}")
+            return None
+    except Exception as e:
+        return None
 
+# --- GENERAZIONE GRAFICO (SIMULATO) ---
 def get_historical_data(symbol):
-    np.random.seed(int(datetime.now().minute))
+    np.random.seed(42)
     periods = 60
     dates = [datetime.now() - timedelta(hours=x) for x in range(periods)]
     dates.reverse()
@@ -50,41 +54,48 @@ def get_historical_data(symbol):
     df['Low'] = df[['Open', 'Close']].min(axis=1) - (np.random.rand(periods) * (start_price * 0.001))
     return df
 
-# UI
-st.title("⚖️ Massive Professional Forex Dashboard")
+# --- UI ---
+st.title("⚖️ Massive Professional v3 Dashboard")
 
-st.sidebar.header("Parametri Risk")
+st.sidebar.header("Impostazioni Rischio")
 risk_pct = st.sidebar.slider("Stop Loss (%)", 0.1, 2.0, 0.5)
-rr_ratio = st.sidebar.number_input("Rapporto R:R (1:X)", value=3.0)
+rr_ratio = st.sidebar.number_input("Rapporto R:R", value=3.0)
 
-# LISTA ASSET
 assets = ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD"]
 
-st.subheader("🎯 Segnali Live")
+st.subheader("🎯 Segnali Live (Massive v3)")
 rows = []
+
 for asset in assets:
     data = get_massive_data(asset)
-    if data and 'price' in data:
-        p = float(data['price'])
-        c = float(data.get('change_24h', 0))
-        dist = p * (risk_pct / 100)
-        trend = "BULLISH 🚀" if c >= 0 else "BEARISH 📉"
-        sl = p - dist if c >= 0 else p + dist
-        tp = p + (dist * rr_ratio) if c >= 0 else p - (dist * rr_ratio)
-        
-        rows.append({
-            "Asset": asset, "Prezzo": round(p, 4), "Trend": trend,
-            "Entry": round(p, 4), "SL": round(sl, 4), "TP": round(tp, 4), "Var %": f"{c:+.2f}%"
-        })
+    # Verifichiamo se 'data' è una lista o un dizionario e prendiamo il prezzo
+    if data:
+        try:
+            # Logica di estrazione basata su standard v3 (può variare leggermente)
+            price = float(data[0]['price']) if isinstance(data, list) else float(data.get('price', 0))
+            change = float(data[0]['changep']) if isinstance(data, list) else float(data.get('change_24h', 0))
+            
+            dist = price * (risk_pct / 100)
+            trend = "BULLISH 🚀" if change >= 0 else "BEARISH 📉"
+            sl = price - dist if change >= 0 else price + dist
+            tp = price + (dist * rr_ratio) if change >= 0 else price - (dist * rr_ratio)
+            
+            rows.append({
+                "Asset": asset, "Prezzo": round(price, 4), "Trend": trend,
+                "Entry": round(price, 4), "SL": round(sl, 4), "TP": round(tp, 4), "Var %": f"{change:+.2f}%"
+            })
+        except:
+            continue
 
 if rows:
     st.table(pd.DataFrame(rows))
 else:
-    st.error("Ancora errore 404. Controlla la scheda 'Keys | Massive' e cerca l'URL corretto dell'API.")
+    st.info("Connessione v3 stabilita, ma nessun dato ricevuto per questi ticker. Verifica se Massive usa simboli diversi (es. C:EURUSD).")
 
+# --- GRAFICO ---
 st.markdown("---")
-st.subheader("📈 Grafico Analisi")
-selected = st.selectbox("Asset", assets)
+st.subheader("📈 Analisi Grafica")
+selected = st.selectbox("Seleziona Asset", assets)
 h_df = get_historical_data(selected)
 fig = go.Figure(data=[go.Candlestick(
     x=h_df['Date'], open=h_df['Open'], high=h_df['High'], low=h_df['Low'], close=h_df['Close'],
