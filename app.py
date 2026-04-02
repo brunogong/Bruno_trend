@@ -2,104 +2,127 @@ import streamlit as st
 import pandas as pd
 import requests
 import plotly.graph_objects as go
+import pandas_ta as ta  # Libreria per analisi tecnica veloce
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Professional Trend Dashboard", layout="wide")
+st.set_page_config(page_title="Trend Master Pro", layout="wide")
 
-# Recupero chiave dai Secrets
 try:
     API_KEY = st.secrets["X_RAPIDAPI_KEY"]
 except:
-    st.error("Errore: Inserisci 'X_RAPIDAPI_KEY' nei Secrets di Streamlit.")
+    st.error("Errore: Inserisci 'X_RAPIDAPI_KEY' nei Secrets.")
     st.stop()
 
-# --- FUNZIONE RECUPERO DATI (Basata sul tuo curl) ---
-def get_ohlc_data(symbol, interval="1day", outputsize="70"):
+# --- FUNZIONE RECUPERO DATI ---
+def get_market_data(symbol, interval="1h"):
     url = "https://twelve-data1.p.rapidapi.com/time_series"
+    headers = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": "twelve-data1.p.rapidapi.com"}
+    params = {"symbol": symbol, "interval": interval, "outputsize": "100", "format": "json"}
     
-    headers = {
-        "x-rapidapi-key": API_KEY,
-        "x-rapidapi-host": "twelve-data1.p.rapidapi.com"
-    }
-    
-    querystring = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": outputsize,
-        "format": "json"
-    }
-
     try:
-        response = requests.get(url, headers=headers, params=querystring, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if "values" in data:
-                df = pd.DataFrame(data["values"])
-                # Conversione tipi dati
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                for col in ['open', 'high', 'low', 'close']:
-                    df[col] = pd.to_numeric(df[col])
-                return df
-            else:
-                st.sidebar.warning(f"Messaggio API: {data.get('message', 'Nessun dato')}")
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        if "values" in data:
+            df = pd.DataFrame(data["values"])
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col])
+            # Ordiniamo dal più vecchio al più recente per i calcoli tecnici
+            df = df.sort_values('datetime')
+            return df
         return None
-    except Exception as e:
-        st.error(f"Errore connessione: {e}")
+    except:
         return None
 
-# --- INTERFACCIA UTENTE ---
-st.title("⚖️ Pro Trend Analyzer")
+# --- UI ---
+st.title("⚖️ Trend Master: Analisi Forza e Livelli")
 
-# Sidebar
-st.sidebar.header("Parametri")
+# Sidebar con lista valute principali
+st.sidebar.header("Selezione Mercato")
 assets = {
-    "Oro (XAU/USD)": "XAU/USD",
-    "Euro/Dollaro": "EUR/USD",
-    "Amazon (AMZN)": "AMZN",
-    "Bitcoin (BTC/USD)": "BTC/USD"
+    "ORO (XAU/USD)": "XAU/USD",
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY",
+    "AUD/USD": "AUD/USD",
+    "USD/CAD": "USD/CAD",
+    "BTC/USD": "BTC/USD",
+    "ETH/USD": "ETH/USD"
 }
 choice = st.sidebar.selectbox("Asset", list(assets.keys()))
-tf = st.sidebar.selectbox("Timeframe", ["1min", "15min", "1h", "1day"], index=3)
+tf = st.sidebar.selectbox("Timeframe", ["15min", "1h", "4h", "1day"], index=1)
+rr_ratio = st.sidebar.slider("Rapporto Rischio/Rendimento (TP:SL)", 1.5, 5.0, 3.0)
 
-# Calcolo segnali
-risk_pct = st.sidebar.slider("Distanza SL (%)", 0.1, 2.0, 0.5)
+df = get_market_data(assets[choice], tf)
 
-# Recupero Dati
-df = get_ohlc_data(assets[choice], tf)
-
-if df is not None and not df.empty:
-    # Metriche Live
-    last_price = df['close'].iloc[0]
-    prev_price = df['close'].iloc[1]
+if df is not None:
+    # --- CALCOLO INDICATORI ---
+    # Forza del Trend (ADX)
+    adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+    current_adx = adx_df['ADX_14'].iloc[-1]
     
+    # Volatilità per SL/TP (ATR)
+    atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+    
+    # Direzione (Media Mobile 20)
+    df['ema20'] = ta.ema(df['close'], length=20)
+    last_price = df['close'].iloc[-1]
+    is_bullish = last_price > df['ema20'].iloc[-1]
+
+    # --- VALUTAZIONE TREND ---
+    if current_adx > 25:
+        trend_status = "FORTE 💪"
+        trend_color = "inverse" # Verde/Rosso
+    elif current_adx < 20:
+        trend_status = "DEBOLE/LATERALE 😴"
+        trend_color = "off"
+    else:
+        trend_status = "MODERATO 📈"
+        trend_color = "normal"
+
+    # --- CALCOLO LIVELLI OPERATIVI ---
+    entry_point = last_price
+    # Lo Stop Loss è calcolato come 1.5 volte l'ATR (volatilità media)
+    sl_dist = atr * 1.5
+    
+    if is_bullish:
+        direction = "BUY"
+        sl = entry_point - sl_dist
+        tp = entry_point + (sl_dist * rr_ratio)
+    else:
+        direction = "SELL"
+        sl = entry_point + sl_dist
+        tp = entry_point - (sl_dist * rr_ratio)
+
+    # --- VISUALIZZAZIONE DASHBOARD ---
     col1, col2, col3 = st.columns(3)
-    col1.metric("Prezzo Attuale", f"{last_price:.4f}")
-    
-    # Logica Segnale
-    trend = "BUY 🚀" if last_price > prev_price else "SELL 📉"
-    dist = last_price * (risk_pct / 100)
-    sl = last_price - dist if trend == "BUY 🚀" else last_price + dist
-    
-    col2.metric("Trend", trend)
-    col3.metric("Suggerimento SL", f"{sl:.4f}")
+    col1.metric("Forza Trend (ADX)", f"{current_adx:.2f}", trend_status)
+    col2.metric("Direzione", direction, delta_color="normal")
+    col3.metric("Prezzo Attuale", f"{last_price:.4f}")
 
-    # --- GRAFICO CANDLESTICK ---
-    st.subheader(f"Analisi Grafica: {choice}")
+    # Pannello Operativo
+    st.markdown(f"### 🎯 Strategia Consigliata: {direction}")
+    if current_adx > 25:
+        st.success(f"**TREND CONFERMATO:** Il trend è sufficientemente forte per un'operazione.")
+    else:
+        st.warning("**ATTENZIONE:** Trend debole. Rischio di falsi segnali elevato.")
+
+    o1, o2, o3 = st.columns(3)
+    o1.info(f"**ENTRY:** {entry_point:.5f}")
+    o2.error(f"**STOP LOSS:** {sl:.5f}")
+    o3.success(f"**TAKE PROFIT:** {tp:.5f}")
+
+    # --- GRAFICO ---
     fig = go.Figure(data=[go.Candlestick(
-        x=df['datetime'],
-        open=df['open'], high=df['high'],
-        low=df['low'], close=df['close'],
-        increasing_line_color='#26a69a',
-        decreasing_line_color='#ef5350'
+        x=df['datetime'], open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'], name="Prezzo"
     )])
-
-    fig.update_layout(
-        template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-        height=600,
-        margin=dict(t=30, b=10)
-    )
-    st.plotly_chart(fig, use_container_width=True)
     
+    # Aggiungiamo la EMA20 al grafico
+    fig.add_trace(go.Scatter(x=df['datetime'], y=df['ema20'], line=dict(color='orange', width=1), name="Trend Line"))
+
+    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=600)
+    st.plotly_chart(fig, use_container_width=True)
+
 else:
-    st.info("🔄 In attesa di dati... Assicurati di aver fatto 'Subscribe' al piano Free su RapidAPI.")
+    st.error("Impossibile caricare i dati. Verifica la chiave API.")
