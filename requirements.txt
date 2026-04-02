@@ -2,5 +2,3 @@ streamlit
 pandas
 requests
 plotly
-numpy
-polygon-api-client
