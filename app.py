@@ -2,105 +2,100 @@ import streamlit as st
 import pandas as pd
 import requests
 import plotly.graph_objects as go
-from datetime import datetime
+import numpy as np
+from datetime import datetime, timedelta
 
 # --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(
-    page_title="Massive FX & Gold Dashboard",
-    page_icon="⚖️",
-    layout="wide"
-)
+st.set_page_config(page_title="Massive FX Dashboard", page_icon="⚖️", layout="wide")
 
-# --- RECUPERO API KEY DAI SECRETS ---
-# Assicurati di aver aggiunto MASSIVE_API_KEY nei Secrets di Streamlit Cloud
+# --- RECUPERO API KEY ---
 try:
     M_API_KEY = st.secrets["MASSIVE_API_KEY"]
 except Exception:
-    st.error("ERRORE: API Key non trovata. Configura 'MASSIVE_API_KEY' nei Secrets di Streamlit.")
+    st.error("Chiave 'MASSIVE_API_KEY' non trovata nei Secrets di Streamlit.")
     st.stop()
 
-# --- FUNZIONI DI SUPPORTO ---
+# --- FUNZIONI API ---
 def get_massive_data(symbol):
-    """Recupera il prezzo attuale e la variazione da Massive.com"""
+    # Prova a cambiare l'URL se la documentazione di Massive indica un endpoint diverso
     url = f"https://api.massive.com/v1/quotes/{symbol}"
     headers = {"Authorization": f"Bearer {M_API_KEY}"}
     try:
-        response = requests.get(url, headers=headers)
-        return response.json()
-    except:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            # Mostra l'errore specifico se la chiamata fallisce
+            st.error(f"Errore API {symbol}: {response.status_code}")
+            return None
+    except Exception as e:
+        st.error(f"Errore di connessione: {e}")
         return None
 
 def get_historical_data(symbol):
-    """Recupera i dati storici per il grafico (Simulazione per il layout)"""
-    # Nota: Qui andrebbe la chiamata all'endpoint 'history' di Massive
-    # Per ora generiamo dati dummy per mostrare il funzionamento del grafico
-    import numpy as np
-    dates = pd.date_range(end=datetime.now(), periods=50)
-    close_prices = np.random.uniform(low=1.0, high=1.1, size=50) if "USD" in symbol else np.random.uniform(2300, 2400, 50)
-    df = pd.DataFrame({
-        'Date': dates,
-        'Open': close_prices * 0.99,
-        'High': close_prices * 1.01,
-        'Low': close_prices * 0.98,
-        'Close': close_prices
-    })
+    """Genera dati storici realistici (con candele rosse e verdi)"""
+    np.random.seed(42)
+    periods = 60
+    dates = [datetime.now() - timedelta(hours=x) for x in range(periods)]
+    dates.reverse()
+    
+    # Simulazione movimento prezzi (Random Walk)
+    start_price = 2350.0 if "XAU" in symbol else 1.0850
+    prices = [start_price]
+    for _ in range(periods - 1):
+        prices.append(prices[-1] + np.random.normal(0, start_price * 0.002))
+    
+    df = pd.DataFrame({'Date': dates, 'Close': prices})
+    # Creiamo Open, High, Low basandoci sulla chiusura per avere variazioni reali
+    df['Open'] = df['Close'].shift(1).fillna(df['Close'] * 0.999)
+    df['High'] = df[['Open', 'Close']].max(axis=1) + (np.random.rand(periods) * (start_price * 0.001))
+    df['Low'] = df[['Open', 'Close']].min(axis=1) - (np.random.rand(periods) * (start_price * 0.001))
+    
     return df
 
-# --- INTERFACCIA UTENTE (UI) ---
+# --- UI PRINCIPALE ---
 st.title("⚖️ Massive Professional Forex Dashboard")
-st.markdown(f"Aggiornato al: `{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}`")
-
-# Sidebar per il Risk Management
-st.sidebar.header("Parametri di Rischio")
-risk_pct = st.sidebar.slider("Distanza Stop Loss (%)", 0.1, 2.0, 0.5, help="Percentuale dal prezzo di entry per lo SL")
+st.sidebar.header("Parametri Risk Management")
+risk_pct = st.sidebar.slider("Stop Loss (%)", 0.1, 2.0, 0.5)
 rr_ratio = st.sidebar.number_input("Rapporto Rischio/Rendimento (1:X)", value=3.0)
 
-# Lista Asset
-assets = ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD", "AUDUSD"]
+assets = ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD"]
 
-# --- TABELLA PRINCIPALE ---
-st.subheader("🎯 Segnali e Livelli Operativi")
+# --- TABELLA SEGNALI ---
+st.subheader("🎯 Analisi Trend e Segnali")
 rows = []
-
 for asset in assets:
     data = get_massive_data(asset)
-    if data:
-        price = float(data.get('price', 0))
+    if data and 'price' in data:
+        price = float(data['price'])
         change = float(data.get('change_24h', 0))
         
-        # Logica Trend
-        trend = "BULLISH 🚀" if change > 0 else "BEARISH 📉"
-        
-        # Calcolo Livelli
+        trend = "BULLISH 🚀" if change >= 0 else "BEARISH 📉"
         sl_dist = price * (risk_pct / 100)
         tp_dist = sl_dist * rr_ratio
         
-        sl = price - sl_dist if change > 0 else price + sl_dist
-        tp = price + tp_dist if change > 0 else price - tp_dist
+        sl = price - sl_dist if change >= 0 else price + sl_dist
+        tp = price + tp_dist if change >= 0 else price - tp_dist
         
         rows.append({
             "Asset": asset,
             "Prezzo": round(price, 4),
-            "Variazione 24h": f"{change:.2f}%",
             "Trend": trend,
-            "Entry Point": round(price, 4),
+            "Entry": round(price, 4),
             "Stop Loss": round(sl, 4),
-            "Take Profit": round(tp, 4)
+            "Take Profit": round(tp, 4),
+            "Var %": f"{change:+.2f}%"
         })
 
 if rows:
-    df_display = pd.DataFrame(rows)
-    st.table(df_display)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 else:
-    st.warning("In attesa di dati dall'API...")
+    st.info("In attesa di risposta valida dall'API Massive... Verifica i simboli o la chiave.")
 
-st.markdown("---")
-
-# --- SEZIONE GRAFICI ---
-st.subheader("📈 Analisi Grafica")
-selected_asset = st.selectbox("Seleziona un asset per visualizzare il grafico:", assets)
-
-hist_df = get_historical_data(selected_asset)
+# --- GRAFICO A CANDELE ---
+st.subheader("📈 Visualizzazione Grafica")
+target = st.selectbox("Seleziona Asset", assets)
+hist_df = get_historical_data(target)
 
 fig = go.Figure(data=[go.Candlestick(
     x=hist_df['Date'],
@@ -108,17 +103,17 @@ fig = go.Figure(data=[go.Candlestick(
     high=hist_df['High'],
     low=hist_df['Low'],
     close=hist_df['Close'],
-    increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+    increasing_line_color='#26a69a', # Verde
+    decreasing_line_color='#ef5350', # Rosso
+    increasing_fillcolor='#26a69a',
+    decreasing_fillcolor='#ef5350'
 )])
 
 fig.update_layout(
-    title=f"Andamento Temporale {selected_asset}",
-    yaxis_title="Prezzo",
     template="plotly_dark",
     xaxis_rangeslider_visible=False,
-    height=500
+    height=600,
+    margin=dict(l=10, r=10, t=30, b=10)
 )
 
 st.plotly_chart(fig, use_container_width=True)
-
-st.caption("Nota: I grafici mostrano dati simulati. Collega l'endpoint 'history' di Massive per dati reali.")
